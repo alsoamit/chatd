@@ -1,0 +1,28 @@
+# Build artifacts
+/bin/
+/dist/
+
+# Local environment / secrets
+/.env
+/.env.local
+/*.env
+!/.env.example
+
+# Per-user runtime state (only relevant if someone runs chatd from the
+# checkout itself rather than via a packaged install)
+/data.db
+/chatd.log
+/ipc.sock
+/chatd.pid
+
+# Editor / OS
+*.swp
+*.swo
+.DS_Store
+.idea/
+.vscode/
+
+# Test artefacts
+/coverage.out
+*.test
+*.prof

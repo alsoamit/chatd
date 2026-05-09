@@ -1,0 +1,20 @@
+[Unit]
+Description=chatd — terminal-native realtime chat daemon
+Documentation=https://github.com/alsoamit/chatd
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/chatd
+Restart=on-failure
+RestartSec=2s
+# Drop trickier ambient capabilities for safety: chatd never needs them.
+NoNewPrivileges=true
+PrivateTmp=true
+# Default journald logging.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

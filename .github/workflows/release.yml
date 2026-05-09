@@ -1,0 +1,102 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version tag to publish (e.g. v0.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [[ -n "${{ inputs.tag }}" ]]; then
+            echo "version=${{ inputs.tag }}" >>"$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF##*/}" >>"$GITHUB_OUTPUT"
+          fi
+          echo "commit=$(git rev-parse --short HEAD)" >>"$GITHUB_OUTPUT"
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build tarball
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          make _build_arch \
+            VERSION='${{ steps.ver.outputs.version }}' \
+            COMMIT='${{ steps.ver.outputs.commit }}' \
+            GOOS='${{ matrix.goos }}' GOARCH='${{ matrix.goarch }}'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chatd-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [[ -n "${{ inputs.tag }}" ]]; then
+            echo "version=${{ inputs.tag }}" >>"$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF##*/}" >>"$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.version }}
+          name: chatd ${{ steps.ver.outputs.version }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
