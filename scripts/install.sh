@@ -78,6 +78,41 @@ mkdir -p "$BIN_DIR" "$CFG_DIR" "$DATA_DIR" "$SYSTEMD_DIR"
 # Locate the script's own directory (and thus a colocated tarball, if any).
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" >/dev/null 2>&1 && pwd)"
 
+# tty for interactive prompts. When the script is run via `curl ... | bash`
+# stdin is the pipe (closed for input); we read straight from the
+# controlling terminal instead so prompts work either way. If neither
+# is available (unattended runs, CI, sandboxed shells), the function
+# returns the empty string and the caller is expected to use defaults
+# from the environment.
+read_tty() {
+  local prompt="$1" __out=""
+  # Brace-group redirects so a failed `</dev/tty` open is suppressed
+  # before bash logs it to stderr. Fall back to plain stdin if /dev/tty
+  # is unavailable; otherwise leave __out empty.
+  { read -r -p "$prompt" __out </dev/tty; } 2>/dev/null \
+    || { [[ -t 0 ]] && read -r -p "$prompt" __out; } \
+    || __out=""
+  printf '%s' "$__out"
+}
+
+have_tty() {
+  ( exec </dev/tty ) 2>/dev/null && return 0
+  [[ -t 0 ]]
+}
+
+# Detect a currently-installed chatd version, if any.
+existing_version() {
+  local cand=""
+  if [[ -x "$BIN_DIR/chatd" ]]; then
+    cand="$BIN_DIR/chatd"
+  elif command -v chatd >/dev/null 2>&1; then
+    cand="$(command -v chatd)"
+  fi
+  if [[ -n "$cand" ]]; then
+    "$cand" --version 2>/dev/null | awk 'NR==1 {print $2}'
+  fi
+}
+
 # --- Resolve mode -----------------------------------------------------
 if [[ "$MODE" == "auto" ]]; then
   if [[ -x "$script_dir/chatd" && -x "$script_dir/chat" && -x "$script_dir/chat-client" ]]; then
@@ -137,6 +172,31 @@ case "$MODE" in
       asset="chatd-${VERSION}-linux-${goarch}.tar.gz"
       url="https://github.com/$REPO/releases/download/$VERSION/$asset"
     fi
+
+    # If chatd is already installed, confirm the update before doing
+    # anything destructive. The user can decline and we exit clean.
+    current="$(existing_version || true)"
+    if [[ -n "$current" ]]; then
+      if [[ "$current" == "$VERSION" ]]; then
+        c_cyan "chatd $current is already installed."
+        ans="$(read_tty "Reinstall the same version? [y/N]: ")"
+        case "${ans:-N}" in
+          [yY]*) ;;
+          *) c_cyan "nothing to do."; exit 0 ;;
+        esac
+      else
+        c_cyan "chatd $current is installed; latest is $VERSION."
+        ans="$(read_tty "Update $current → $VERSION? [Y/n]: ")"
+        case "${ans:-Y}" in
+          [yY]*|"") ;;
+          *) c_cyan "skipping update."; exit 0 ;;
+        esac
+      fi
+      if command -v systemctl >/dev/null; then
+        systemctl --user stop chatd.service 2>/dev/null || true
+      fi
+    fi
+
     c_cyan "downloading $url"
     curl -fsSL --retry 3 -o "$work/$asset" "$url"
 
@@ -188,20 +248,61 @@ if ! command -v ghostty >/dev/null; then
   fi
 fi
 
-# 5. chatd.env (only if missing)
+# 5. chatd.env — interactive on first install; preserved on re-runs.
 ENV_FILE="$CFG_DIR/chatd.env"
 if [[ ! -f "$ENV_FILE" ]]; then
+  # Username: env override wins, else prompt, else fall back to whoami.
+  if [[ -n "${CHATD_USERNAME:-}" ]]; then
+    user="$CHATD_USERNAME"
+  else
+    default_user="$(whoami)"
+    user_in="$(read_tty "Username [$default_user]: ")"
+    user="${user_in:-$default_user}"
+  fi
+
+  # Relay URL: env override wins, else prompt (required, no default).
+  if [[ -n "${CHATD_RELAY_URL:-}" ]]; then
+    url="$CHATD_RELAY_URL"
+  elif have_tty; then
+    while :; do
+      url="$(read_tty 'Relay URL (http://host:port or https://domain) [required]: ')"
+      if [[ -z "$url" ]]; then
+        c_red "relay URL is required — installation cancelled."
+        c_red "re-run the installer when you know your relay's address."
+        exit 1
+      fi
+      case "$url" in
+        http://*|https://*|ws://*|wss://*) break ;;
+        *) c_yellow "URL must start with http://, https://, ws://, or wss://. try again." ;;
+      esac
+    done
+  else
+    c_red "relay URL is required and no terminal is available for the prompt."
+    c_red "re-run with CHATD_RELAY_URL set, e.g.:"
+    c_red "  CHATD_RELAY_URL=http://relay.example:7878 bash install.sh"
+    exit 1
+  fi
+
+  # Translate http(s):// to ws(s):// and append /ws if no path was given.
+  case "$url" in
+    http://*)  url="ws://${url#http://}" ;;
+    https://*) url="wss://${url#https://}" ;;
+  esac
+  no_proto="${url#*://}"
+  if [[ "$no_proto" != *"/"* ]]; then
+    url="${url}/ws"
+  fi
+
+  token="${CHATD_TOKEN:-open}"
+
   cat > "$ENV_FILE" <<EOF
-CHATD_USERNAME=${CHATD_USERNAME:-$(whoami)}
-CHATD_TOKEN=${CHATD_TOKEN:-CHANGE_ME}
-CHATD_RELAY_URL=${CHATD_RELAY_URL:-ws://127.0.0.1:7878/ws}
+CHATD_USERNAME=$user
+CHATD_TOKEN=$token
+CHATD_RELAY_URL=$url
 ${CHATD_TERMINAL:+CHATD_TERMINAL=$CHATD_TERMINAL}
 EOF
   chmod 0600 "$ENV_FILE"
-  c_green "wrote $ENV_FILE"
-  if [[ "${CHATD_TOKEN:-}" == "" ]]; then
-    c_yellow "edit $ENV_FILE — set CHATD_TOKEN and CHATD_RELAY_URL before chatd will be useful."
-  fi
+  c_green "wrote $ENV_FILE  (user=$user  relay=$url)"
 else
   c_cyan "keeping existing $ENV_FILE"
 fi

@@ -67,6 +67,8 @@ func run(args []string) error {
 		return rpcSend(paths, args[1], strings.Join(args[2:], " "))
 	case "logs":
 		return tailLogs()
+	case "update":
+		return runUpdate()
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return nil
@@ -84,7 +86,11 @@ USAGE:
   chat status                 print daemon status
   chat send <peer> <body>...  one-shot send (no UI)
   chat logs                   tail systemd journal for chatd.service
+  chat update                 fetch the latest release and reinstall
+  chat --version              print build metadata
 `
+
+const installerURL = "https://raw.githubusercontent.com/alsoamit/chatd/main/scripts/install.sh"
 
 func openDashboardWindow(paths config.Paths) error {
 	settings, _ := paths.LoadSettings()
@@ -257,6 +263,25 @@ func rpcSend(paths config.Paths, peer, body string) error {
 
 func tailLogs() error {
 	cmd := exec.Command("journalctl", "--user", "-u", "chatd.service", "-f", "--no-pager", "-n", "200")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// runUpdate re-invokes the published install.sh in --download mode.
+// The installer detects the current version, asks the user to confirm
+// the upgrade, swaps the binaries, and restarts chatd.service. We
+// inherit the parent's stdio so prompts work and progress is visible.
+func runUpdate() error {
+	if _, err := exec.LookPath("curl"); err != nil {
+		return fmt.Errorf("chat update needs curl on PATH: %w", err)
+	}
+	if _, err := exec.LookPath("bash"); err != nil {
+		return fmt.Errorf("chat update needs bash on PATH: %w", err)
+	}
+	cmd := exec.Command("bash", "-c",
+		"set -e; curl -fsSL "+installerURL+" | bash -s -- --download")
+	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()

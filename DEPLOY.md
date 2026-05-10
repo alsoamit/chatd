@@ -33,49 +33,67 @@ and attaches it to the release.
 
 ## 2. Install on a user's box
 
-### From a public release (curl one-liner)
-
 ```bash
+# from a published public release
 curl -fsSL https://raw.githubusercontent.com/alsoamit/chatd/main/scripts/install.sh \
   | bash -s -- --download
-```
 
-Pin to a specific tag with `--version v0.1.0`. **Do not run with sudo
-— chatd is a per-user service.**
+# from a downloaded tarball (works for private repos)
+tar xzf chatd-vX.Y.Z-linux-amd64.tar.gz
+bash chatd-vX.Y.Z-linux-amd64/install.sh
 
-### From a downloaded tarball (works for private repos)
-
-On a machine that already has GitHub auth (your laptop, browser or
-`gh release download`):
-
-```bash
-gh release download v0.1.0 --repo alsoamit/chatd \
-  -p '*-linux-amd64.tar.gz' -p 'SHA256SUMS'
-scp chatd-v0.1.0-linux-amd64.tar.gz user@target:/tmp/
-```
-
-On the target box:
-
-```bash
-cd /tmp
-tar xzf chatd-v0.1.0-linux-amd64.tar.gz
-bash chatd-v0.1.0-linux-amd64/install.sh
-```
-
-The bundled `install.sh` autodetects "tarball mode" because the
-binaries sit next to it, copies them into `~/.local/bin`, drops a
-starter `~/.config/chatd/chatd.env`, registers the systemd-user unit,
-and starts the service.
-
-### From a checkout (developer / source install)
-
-```bash
-cd ~/projects/lab/chatd
+# from a source checkout (developer install)
 bash scripts/install.sh
 ```
 
-Detects "source mode" (sees `../go.mod`), builds the three binaries,
-and proceeds with the same install path. Requires the Go toolchain.
+**Do not run with sudo** — chatd is a per-user service.
+
+### Interactive prompts
+
+On the **first** install on a given user, the script asks for:
+
+- `Username [<your-shell-user>]:` — press Enter to accept the default,
+  or type something else (`a-zA-Z0-9._-`, max 64 chars).
+- `Relay URL (http://host:port or https://domain) [required]:` — no
+  default. Empty input cancels the install. The script accepts
+  `http://`, `https://`, `ws://`, `wss://`; it auto-translates
+  `http→ws` and `https→wss` and appends `/ws` if you don't include a
+  path. Examples that all work:
+
+  ```
+  http://4.61.213.126:7878
+  https://relay.example.com
+  wss://relay.example.com/ws
+  ```
+
+You can pre-fill them via env to skip the prompts:
+
+```bash
+CHATD_USERNAME=alice \
+CHATD_RELAY_URL=https://relay.example.com \
+  bash chatd-vX.Y.Z-linux-amd64/install.sh
+```
+
+### Update flow
+
+When the script detects an existing chatd install (matching binary on
+`$PATH` or in `~/.local/bin`) it prints the current and target
+version and prompts:
+
+```
+chatd v0.1.0 is installed; latest is v0.2.0.
+Update v0.1.0 → v0.2.0? [Y/n]:
+```
+
+On confirmation it stops the service, swaps binaries, and restarts.
+`~/.config/chatd/chatd.env` and `~/.local/share/chatd/data.db` (your
+local message history) are preserved.
+
+To re-run the same flow without remembering the curl line:
+
+```bash
+chat update
+```
 
 ---
 
@@ -136,6 +154,8 @@ chat users                 # online peers + unread counts
 chat status                # daemon + relay state
 chat send <peer> <msg>     # one-shot send
 chat logs                  # journalctl --user -u chatd.service -f
+chat update                # pull the latest release and reinstall
+chat --version             # build metadata
 ```
 
 In the dashboard: ↑/↓ select, Enter opens the conversation, `q` quit.
@@ -183,20 +203,30 @@ exec $SHELL -l
 
 ## 7. Upgrade
 
-Re-run the installer with a newer version:
+Easiest:
 
 ```bash
-# public repo
-curl -fsSL https://raw.githubusercontent.com/alsoamit/chatd/main/scripts/install.sh \
-  | bash -s -- --download --version v0.1.1
-systemctl --user restart chatd.service
-
-# private repo: scp the new tarball, extract, rerun install.sh
+chat update
 ```
 
-The installer keeps your existing `~/.config/chatd/chatd.env`
-untouched on re-runs. Local message history at
-`~/.local/share/chatd/data.db` is also preserved.
+Or run the installer directly:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/alsoamit/chatd/main/scripts/install.sh \
+  | bash -s -- --download
+```
+
+Either path resolves the latest tag, prompts you to confirm
+`current → latest`, stops the service, swaps binaries, and restarts.
+`~/.config/chatd/chatd.env` and `~/.local/share/chatd/data.db` are
+preserved.
+
+To pin a specific version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/alsoamit/chatd/main/scripts/install.sh \
+  | bash -s -- --download --version v0.1.1
+```
 
 ---
 

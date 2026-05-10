@@ -24,12 +24,6 @@ typing `rm -rf /` just sends a string to your peer.
 
 ## Install
 
-See [`DEPLOY.md`](DEPLOY.md) for the full user-side recipe (cut a
-release, install from a release tarball or a public curl one-liner,
-configure, verify, upgrade, troubleshoot).
-
-The short version:
-
 ```bash
 # from a published public release
 curl -fsSL https://raw.githubusercontent.com/alsoamit/chatd/main/scripts/install.sh \
@@ -46,10 +40,32 @@ bash scripts/install.sh
 **Do not run with sudo.** chatd is a systemd-user service; it lives
 entirely under your `$HOME`.
 
-The installer drops a starter `~/.config/chatd/chatd.env` you'll need
-to edit (`CHATD_TOKEN`, `CHATD_RELAY_URL`); env knobs at install time
-pre-fill it: `CHATD_USERNAME`, `CHATD_TOKEN`, `CHATD_RELAY_URL`,
-`CHATD_TERMINAL`.
+On a fresh install the script asks for two things:
+
+- **Username** — defaults to your shell `$(whoami)`.
+- **Relay URL** — required, no default. Accepts
+  `http://host:port`, `https://domain[:port]`, `ws://...`, or
+  `wss://...`. The installer auto-translates `http→ws` / `https→wss`
+  and appends `/ws` if you omit the path.
+
+If the relay URL is empty, installation is cancelled.
+
+On re-run with chatd already installed (the typical "update"
+scenario), the script detects the existing version, prompts
+`Update X → Y? [Y/n]`, and on confirmation stops the service, swaps
+binaries, and restarts. Your `chatd.env` and local message history
+are preserved.
+
+To keep up to date without remembering the curl line, use:
+
+```bash
+chat update
+```
+
+It's a thin wrapper around the same install.sh download flow.
+
+See [`DEPLOY.md`](DEPLOY.md) for the long-form walkthrough
+(verification, PATH setup, systemd cheatsheet, troubleshooting).
 
 ## CLI
 
