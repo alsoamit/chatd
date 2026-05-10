@@ -86,18 +86,33 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" >/dev/null 2>&1 && pwd)"
 # from the environment.
 read_tty() {
   local prompt="$1" __out=""
-  # Brace-group redirects so a failed `</dev/tty` open is suppressed
-  # before bash logs it to stderr. Fall back to plain stdin if /dev/tty
-  # is unavailable; otherwise leave __out empty.
-  { read -r -p "$prompt" __out </dev/tty; } 2>/dev/null \
-    || { [[ -t 0 ]] && read -r -p "$prompt" __out; } \
-    || __out=""
+  # Probe /dev/tty in a subshell so a failed open's error message goes
+  # to /dev/null. Then do the real read in the main shell with stderr
+  # untouched, so bash's `read -p` actually shows the prompt to the
+  # user.
+  if ( : </dev/tty ) 2>/dev/null; then
+    read -r -p "$prompt" __out </dev/tty || __out=""
+  elif [[ -t 0 ]]; then
+    read -r -p "$prompt" __out || __out=""
+  fi
   printf '%s' "$__out"
 }
 
 have_tty() {
   ( exec </dev/tty ) 2>/dev/null && return 0
   [[ -t 0 ]]
+}
+
+# Read a single key from a KEY=VAL .env file. Empty if missing.
+env_value() {
+  local file="$1" key="$2"
+  [[ -f "$file" ]] || { printf ''; return 0; }
+  awk -F= -v k="$key" '
+    $0 ~ "^[[:space:]]*"k"=" {
+      sub("^[[:space:]]*"k"=", "");
+      gsub(/^["'\'']|["'\'']$/, "");
+      print; exit
+    }' "$file"
 }
 
 # Detect a currently-installed chatd version, if any.
@@ -125,6 +140,26 @@ if [[ "$MODE" == "auto" ]]; then
   fi
 fi
 c_cyan "mode: $MODE"
+
+# Tracks whether the user explicitly asked for a same-version reinstall,
+# so we know to re-prompt for username/URL even when an env file exists.
+reinstall=0
+
+# --- Server-mode prompt -----------------------------------------------
+# Headless servers can't pop GUI windows. CHATD_SERVER=1|0 in the env
+# bypasses the prompt; otherwise we ask once and remember the answer.
+if [[ -n "${CHATD_SERVER:-}" ]]; then
+  is_server="$CHATD_SERVER"
+else
+  ans="$(read_tty 'Is this a headless server install (no popup windows)? [y/N]: ')"
+  case "${ans:-N}" in
+    [yY]*) is_server=1 ;;
+    *)     is_server=0 ;;
+  esac
+fi
+if [[ "$is_server" == "1" ]]; then
+  c_cyan "server mode — terminal emulator setup will be skipped"
+fi
 
 # --- Acquire binaries -------------------------------------------------
 case "$MODE" in
@@ -181,7 +216,7 @@ case "$MODE" in
         c_cyan "chatd $current is already installed."
         ans="$(read_tty "Reinstall the same version? [y/N]: ")"
         case "${ans:-N}" in
-          [yY]*) ;;
+          [yY]*) reinstall=1 ;;
           *) c_cyan "nothing to do."; exit 0 ;;
         esac
       else
@@ -234,41 +269,103 @@ if "$BIN_DIR/chatd" --version >/dev/null 2>&1; then
   c_cyan "$($BIN_DIR/chatd --version)"
 fi
 
-# 4. Ghostty / terminal emulator (best-effort)
-if ! command -v ghostty >/dev/null; then
-  if command -v kitty >/dev/null \
-    || command -v alacritty >/dev/null \
-    || command -v foot >/dev/null \
-    || command -v xterm >/dev/null; then
-    c_yellow "ghostty not found; chatd will use the next available terminal."
+# 4. Terminal emulator handling.
+#
+# On a desktop machine we want a popup-capable emulator. Look for one of
+# the supported list; if none are found, offer to apt-install kitty
+# (modern, X11+Wayland, no fuss). On a server install (CHATD_SERVER=1
+# or "yes" to the prompt above) we skip this step entirely — chatd
+# falls back to the headless launcher and `chat dashboard` works inline.
+detect_emulator() {
+  for c in ghostty kitty alacritty foot xterm; do
+    if command -v "$c" >/dev/null 2>&1; then
+      printf '%s' "$c"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if [[ "$is_server" == "1" ]]; then
+  c_cyan "skipping terminal emulator setup (server install)"
+else
+  if found="$(detect_emulator)"; then
+    c_green "using terminal: $found"
   else
-    c_yellow "no terminal emulator detected. install ghostty (https://ghostty.org/download)"
-    c_yellow "or 'sudo apt install xterm' for popup conversation windows."
-    c_yellow "without one, chatd still works — use 'chat dashboard' inline."
+    c_yellow "no supported terminal emulator detected on \$PATH."
+    c_yellow "without one, popup dashboard / conversation windows won't open."
+    if command -v apt-get >/dev/null 2>&1; then
+      ans="$(read_tty 'Install kitty via apt now? [Y/n]: ')"
+      case "${ans:-Y}" in
+        [yY]*|"")
+          c_cyan "running: sudo apt-get install -y kitty"
+          if sudo apt-get install -y kitty; then
+            c_green "kitty installed: $(command -v kitty)"
+          else
+            c_red "kitty install failed — run 'sudo apt install kitty' yourself, or pick another emulator."
+          fi
+          ;;
+        *)
+          c_cyan "skipping. you can run 'chat dashboard' inline, or install one of:"
+          c_cyan "  ghostty / kitty / alacritty / foot / xterm"
+          ;;
+      esac
+    else
+      c_yellow "no apt-get on this system. install one manually:"
+      c_yellow "  ghostty / kitty / alacritty / foot / xterm"
+    fi
   fi
 fi
 
-# 5. chatd.env — interactive on first install; preserved on re-runs.
+# 5. chatd.env
+#
+# Three flows:
+#   - fresh install (no env file): prompt for everything, defaults to
+#     $(whoami) for username, no default for URL.
+#   - update (env file exists, reinstall=0): preserve as-is.
+#   - reinstall (same version, user confirmed): re-prompt with the
+#     CURRENT values as defaults, so pressing Enter keeps them.
+#
+# Env-var overrides (CHATD_USERNAME / CHATD_RELAY_URL / CHATD_TOKEN /
+# CHATD_TERMINAL) skip the matching prompt at any time.
 ENV_FILE="$CFG_DIR/chatd.env"
+
+write_env=0
 if [[ ! -f "$ENV_FILE" ]]; then
-  # Username: env override wins, else prompt, else fall back to whoami.
+  write_env=1
+elif [[ "$reinstall" == "1" ]]; then
+  write_env=1
+  c_cyan "reinstall: re-running config (press Enter to keep current values)"
+fi
+
+if [[ "$write_env" == "1" ]]; then
+  cur_user="$(env_value "$ENV_FILE" CHATD_USERNAME)"
+  cur_url="$(env_value  "$ENV_FILE" CHATD_RELAY_URL)"
+  cur_tok="$(env_value  "$ENV_FILE" CHATD_TOKEN)"
+  cur_term="$(env_value "$ENV_FILE" CHATD_TERMINAL)"
+
+  # Username
   if [[ -n "${CHATD_USERNAME:-}" ]]; then
     user="$CHATD_USERNAME"
   else
-    default_user="$(whoami)"
+    default_user="${cur_user:-$(whoami)}"
     user_in="$(read_tty "Username [$default_user]: ")"
     user="${user_in:-$default_user}"
   fi
 
-  # Relay URL: env override wins, else prompt (required, no default).
+  # Relay URL
   if [[ -n "${CHATD_RELAY_URL:-}" ]]; then
     url="$CHATD_RELAY_URL"
   elif have_tty; then
     while :; do
-      url="$(read_tty 'Relay URL (http://host:port or https://domain) [required]: ')"
+      if [[ -n "$cur_url" ]]; then
+        url_in="$(read_tty "Relay URL [$cur_url]: ")"
+        url="${url_in:-$cur_url}"
+      else
+        url="$(read_tty 'Relay URL (http://host:port or https://domain) [required]: ')"
+      fi
       if [[ -z "$url" ]]; then
         c_red "relay URL is required — installation cancelled."
-        c_red "re-run the installer when you know your relay's address."
         exit 1
       fi
       case "$url" in
@@ -283,7 +380,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
     exit 1
   fi
 
-  # Translate http(s):// to ws(s):// and append /ws if no path was given.
+  # Translate http(s):// → ws(s):// and append /ws if no path was given.
   case "$url" in
     http://*)  url="ws://${url#http://}" ;;
     https://*) url="wss://${url#https://}" ;;
@@ -293,14 +390,15 @@ if [[ ! -f "$ENV_FILE" ]]; then
     url="${url}/ws"
   fi
 
-  token="${CHATD_TOKEN:-open}"
+  token="${CHATD_TOKEN:-${cur_tok:-open}}"
+  term="${CHATD_TERMINAL:-$cur_term}"
 
-  cat > "$ENV_FILE" <<EOF
-CHATD_USERNAME=$user
-CHATD_TOKEN=$token
-CHATD_RELAY_URL=$url
-${CHATD_TERMINAL:+CHATD_TERMINAL=$CHATD_TERMINAL}
-EOF
+  {
+    printf 'CHATD_USERNAME=%s\n' "$user"
+    printf 'CHATD_TOKEN=%s\n' "$token"
+    printf 'CHATD_RELAY_URL=%s\n' "$url"
+    [[ -n "$term" ]] && printf 'CHATD_TERMINAL=%s\n' "$term"
+  } > "$ENV_FILE"
   chmod 0600 "$ENV_FILE"
   c_green "wrote $ENV_FILE  (user=$user  relay=$url)"
 else
