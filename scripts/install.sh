@@ -27,7 +27,7 @@
 # Other knobs:
 #
 #   PREFIX=$HOME/.local            install destination (default)
-#   CHATD_REPO=alsoamit/chatd      GitHub slug for --download
+#   CHATD_REPO=alsoamit/rootchat      GitHub slug for --download
 #   CHATD_VERSION=vX.Y.Z           pin a release with --download
 #   CHATD_NO_START=1               don't auto-start chatd.service
 #   CHATD_TARBALL_URL=<url>        direct asset URL (private repos)
@@ -39,12 +39,18 @@ c_green()  { printf '\033[1;32m%s\033[0m\n' "$*"; }
 c_cyan()   { printf '\033[1;36m%s\033[0m\n' "$*"; }
 c_yellow() { printf '\033[1;33m%s\033[0m\n' "$*"; }
 
-if [[ "${OSTYPE:-}" != linux* ]]; then
-  c_red "chatd is Linux-only (OSTYPE=$OSTYPE)"; exit 1
-fi
+# --- OS detection -----------------------------------------------------
+# We support Linux (systemd-user) and macOS (launchd LaunchAgent). Pick
+# the platform up front; everything that differs branches on $PLATFORM.
+case "$(uname -s)" in
+  Linux)  PLATFORM=linux ; GOOS=linux ;;
+  Darwin) PLATFORM=darwin ; GOOS=darwin ;;
+  *)      c_red "unsupported OS: $(uname -s)"; exit 1 ;;
+esac
+
 if [[ "$(id -u)" == "0" ]]; then
   c_red "run install.sh as a normal user, not root."
-  c_red "chatd is a systemd-user service that installs into your \$HOME."
+  c_red "chatd installs into your \$HOME and registers a per-user service."
   exit 1
 fi
 
@@ -52,9 +58,13 @@ PREFIX="${PREFIX:-$HOME/.local}"
 BIN_DIR="$PREFIX/bin"
 CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/chatd"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/chatd"
-SYSTEMD_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 
-REPO="${CHATD_REPO:-alsoamit/chatd}"
+# Service-manager directories (only one is actually used).
+SYSTEMD_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+LAUNCHD_DIR="$HOME/Library/LaunchAgents"
+LAUNCHD_LOG="$HOME/Library/Logs/chatd.log"
+
+REPO="${CHATD_REPO:-alsoamit/rootchat}"
 VERSION="${CHATD_VERSION:-}"
 MODE="auto"
 
@@ -73,7 +83,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-mkdir -p "$BIN_DIR" "$CFG_DIR" "$DATA_DIR" "$SYSTEMD_DIR"
+mkdir -p "$BIN_DIR" "$CFG_DIR" "$DATA_DIR"
+if [[ "$PLATFORM" == "linux" ]]; then
+  mkdir -p "$SYSTEMD_DIR"
+else
+  mkdir -p "$LAUNCHD_DIR" "$(dirname "$LAUNCHD_LOG")"
+fi
 
 # Locate the script's own directory (and thus a colocated tarball, if any).
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" >/dev/null 2>&1 && pwd)"
@@ -113,6 +128,21 @@ env_value() {
       gsub(/^["'\'']|["'\'']$/, "");
       print; exit
     }' "$file"
+}
+
+# Stop the running chatd via whichever service manager applies.
+# Always returns 0 so callers can chain this with || true.
+stop_service() {
+  if [[ "$PLATFORM" == "darwin" ]]; then
+    if command -v launchctl >/dev/null; then
+      launchctl bootout "gui/$(id -u)/io.chatd" 2>/dev/null || true
+    fi
+  else
+    if command -v systemctl >/dev/null; then
+      systemctl --user stop chatd.service 2>/dev/null || true
+    fi
+  fi
+  return 0
 }
 
 # Detect a currently-installed chatd version, if any.
@@ -204,7 +234,7 @@ case "$MODE" in
           | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
         [[ -n "$VERSION" ]] || { c_red "could not resolve version (private repo? set CHATD_TARBALL_URL)"; exit 1; }
       fi
-      asset="chatd-${VERSION}-linux-${goarch}.tar.gz"
+      asset="chatd-${VERSION}-${GOOS}-${goarch}.tar.gz"
       url="https://github.com/$REPO/releases/download/$VERSION/$asset"
     fi
 
@@ -227,9 +257,7 @@ case "$MODE" in
           *) c_cyan "skipping update."; exit 0 ;;
         esac
       fi
-      if command -v systemctl >/dev/null; then
-        systemctl --user stop chatd.service 2>/dev/null || true
-      fi
+      stop_service || true
     fi
 
     c_cyan "downloading $url"
@@ -252,12 +280,17 @@ bin_chatd="$src_dir/chatd"
 bin_chat="$src_dir/chat"
 bin_client="$src_dir/chat-client"
 unit_src="$src_dir/chatd.service"
+plist_src="$src_dir/io.chatd.plist"
 env_src="$src_dir/.env.example"
 
 for f in "$bin_chatd" "$bin_chat" "$bin_client"; do
   [[ -x "$f" ]] || { c_red "missing or non-executable: $f"; exit 1; }
 done
-[[ -f "$unit_src" ]] || { c_red "missing systemd unit: $unit_src"; exit 1; }
+if [[ "$PLATFORM" == "linux" ]]; then
+  [[ -f "$unit_src" ]] || { c_red "missing systemd unit: $unit_src"; exit 1; }
+else
+  [[ -f "$plist_src" ]] || { c_red "missing launchd plist: $plist_src"; exit 1; }
+fi
 
 # --- Install ----------------------------------------------------------
 install -m 0755 "$bin_chatd"  "$BIN_DIR/chatd"
@@ -294,7 +327,7 @@ else
   else
     c_yellow "no supported terminal emulator detected on \$PATH."
     c_yellow "without one, popup dashboard / conversation windows won't open."
-    if command -v apt-get >/dev/null 2>&1; then
+    if [[ "$PLATFORM" == "linux" ]] && command -v apt-get >/dev/null 2>&1; then
       ans="$(read_tty 'Install kitty via apt now? [Y/n]: ')"
       case "${ans:-Y}" in
         [yY]*|"")
@@ -307,12 +340,28 @@ else
           ;;
         *)
           c_cyan "skipping. you can run 'chat dashboard' inline, or install one of:"
-          c_cyan "  ghostty / kitty / alacritty / foot / xterm"
+          c_cyan "  ghostty / kitty / alacritty / wezterm / foot / xterm"
+          ;;
+      esac
+    elif [[ "$PLATFORM" == "darwin" ]] && command -v brew >/dev/null 2>&1; then
+      ans="$(read_tty 'Install Ghostty via Homebrew now? [Y/n]: ')"
+      case "${ans:-Y}" in
+        [yY]*|"")
+          c_cyan "running: brew install --cask ghostty"
+          if brew install --cask ghostty; then
+            c_green "ghostty installed"
+          else
+            c_red "ghostty install failed — try 'brew install --cask ghostty' yourself, or pick another emulator."
+          fi
+          ;;
+        *)
+          c_cyan "skipping. you can run 'chat dashboard' inline, or install one of:"
+          c_cyan "  ghostty / kitty / alacritty / wezterm  (e.g. brew install --cask <name>)"
           ;;
       esac
     else
-      c_yellow "no apt-get on this system. install one manually:"
-      c_yellow "  ghostty / kitty / alacritty / foot / xterm"
+      c_yellow "no package manager I recognise. install one manually:"
+      c_yellow "  ghostty / kitty / alacritty / wezterm / foot / xterm"
     fi
   fi
 fi
@@ -425,19 +474,42 @@ else
   fi
 fi
 
-# 6. systemd-user unit
-UNIT_DST="$SYSTEMD_DIR/chatd.service"
-sed "s|%h/.local/bin/chatd|$BIN_DIR/chatd|" "$unit_src" > "$UNIT_DST"
-c_green "installed systemd unit $UNIT_DST"
+# 6. Service registration — systemd-user on Linux, launchd on macOS.
+if [[ "$PLATFORM" == "linux" ]]; then
+  UNIT_DST="$SYSTEMD_DIR/chatd.service"
+  sed "s|%h/.local/bin/chatd|$BIN_DIR/chatd|" "$unit_src" > "$UNIT_DST"
+  c_green "installed systemd unit $UNIT_DST"
+else
+  PLIST_DST="$LAUNCHD_DIR/io.chatd.plist"
+  sed -e "s|__BIN_DIR__|$BIN_DIR|g" \
+      -e "s|__HOME__|$HOME|g" \
+      "$plist_src" > "$PLIST_DST"
+  chmod 0644 "$PLIST_DST"
+  c_green "installed launchd plist $PLIST_DST"
+fi
 
 # 7. Enable + start
-if command -v systemctl >/dev/null && [[ "${CHATD_NO_START:-0}" != "1" ]]; then
-  systemctl --user daemon-reload || true
-  systemctl --user enable chatd.service >/dev/null 2>&1 || true
-  systemctl --user restart chatd.service || true
-  c_green "chatd.service started"
-  c_cyan  "  status: systemctl --user status chatd"
-  c_cyan  "  logs:   journalctl --user -u chatd.service -f"
+if [[ "${CHATD_NO_START:-0}" != "1" ]]; then
+  if [[ "$PLATFORM" == "linux" ]] && command -v systemctl >/dev/null; then
+    systemctl --user daemon-reload || true
+    systemctl --user enable chatd.service >/dev/null 2>&1 || true
+    systemctl --user restart chatd.service || true
+    c_green "chatd.service started"
+    c_cyan  "  status: systemctl --user status chatd"
+    c_cyan  "  logs:   journalctl --user -u chatd.service -f"
+  elif [[ "$PLATFORM" == "darwin" ]] && command -v launchctl >/dev/null; then
+    uid="$(id -u)"
+    # `bootout` is idempotent — fine to run on a non-existent service.
+    launchctl bootout "gui/$uid/io.chatd" 2>/dev/null || true
+    if launchctl bootstrap "gui/$uid" "$PLIST_DST"; then
+      launchctl kickstart "gui/$uid/io.chatd" >/dev/null 2>&1 || true
+      c_green "io.chatd LaunchAgent loaded"
+      c_cyan  "  status: launchctl print gui/$uid/io.chatd"
+      c_cyan  "  logs:   tail -F $LAUNCHD_LOG"
+    else
+      c_red "launchctl bootstrap failed — try logging out and back in."
+    fi
+  fi
 fi
 
 # 8. PATH — make sure $BIN_DIR resolves on the user's shell now and

@@ -25,6 +25,20 @@ func TestBuildArgsKitty(t *testing.T) {
 	}
 }
 
+func TestBuildArgsWezTerm(t *testing.T) {
+	l := Launcher{Backend: WezTerm}
+	args := l.buildArgs("CHAT — alice", []string{"chat-client", "--peer", "alice"})
+	if args[0] != "start" {
+		t.Errorf("wezterm should start with 'start', got %v", args)
+	}
+	if args[1] != "--class" || args[2] != "CHAT — alice" {
+		t.Errorf("wezterm class missing: %v", args)
+	}
+	if args[3] != "--" || args[4] != "chat-client" {
+		t.Errorf("wezterm separator/argv wrong: %v", args)
+	}
+}
+
 func TestSafeTitle(t *testing.T) {
 	got := SafeTitle("CHAT — alice\x07\x1b]")
 	if strings.ContainsAny(got, "\x07\x1b") {

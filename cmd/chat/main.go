@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -100,7 +101,7 @@ USAGE:
   chat --version              print build metadata
 `
 
-const installerURL = "https://raw.githubusercontent.com/alsoamit/chatd/main/scripts/install.sh"
+const installerURL = "https://raw.githubusercontent.com/alsoamit/rootchat/main/scripts/install.sh"
 
 func openDashboardWindow(paths config.Paths) error {
 	settings, _ := paths.LoadSettings()
@@ -272,6 +273,16 @@ func rpcSend(paths config.Paths, peer, body string) error {
 }
 
 func tailLogs() error {
+	if runtime.GOOS == "darwin" {
+		// LaunchAgent stdout/stderr are redirected to a file by the
+		// installer's plist; tail it directly. On older macOS systems
+		// `tail -F` is the right tool (follow even if the file rotates).
+		path := os.ExpandEnv("$HOME/Library/Logs/chatd.log")
+		cmd := exec.Command("tail", "-F", "-n", "200", path)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		return cmd.Run()
+	}
 	cmd := exec.Command("journalctl", "--user", "-u", "chatd.service", "-f", "--no-pager", "-n", "200")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -353,16 +364,35 @@ func runConfig(paths config.Paths) error {
 	fmt.Printf("wrote %s  (user=%s  relay=%s)\n", paths.EnvFile, username, relayURL)
 
 	// Apply by restarting the daemon. Best-effort — don't fail if the
-	// service isn't installed (e.g. dev runs without systemd).
-	if _, err := exec.LookPath("systemctl"); err == nil {
-		cmd := exec.Command("systemctl", "--user", "restart", "chatd.service")
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err == nil {
-			fmt.Println("chatd.service restarted")
-		}
+	// service isn't installed (e.g. dev runs without systemd/launchd).
+	if err := restartService(); err == nil {
+		fmt.Println("chatd service restarted")
 	}
 	return nil
+}
+
+// restartService restarts the chatd daemon using whichever service
+// manager is available on the host. Returns nil when a restart was
+// successfully issued, an error otherwise.
+func restartService() error {
+	if runtime.GOOS == "darwin" {
+		if _, err := exec.LookPath("launchctl"); err != nil {
+			return err
+		}
+		uid := fmt.Sprintf("%d", os.Getuid())
+		// `kickstart -k` stops + restarts in one go.
+		cmd := exec.Command("launchctl", "kickstart", "-k", "gui/"+uid+"/io.chatd")
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		return cmd.Run()
+	}
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return err
+	}
+	cmd := exec.Command("systemctl", "--user", "restart", "chatd.service")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 // promptDefault writes prompt to stdout, reads one line from in, and
@@ -428,20 +458,34 @@ func runUninstall(paths config.Paths, args []string) error {
 	}
 
 	binDir, binChatd, binChat, binClient := uninstallBinPaths()
-	systemdDir := systemdUserDir()
-	unitPath := filepath.Join(systemdDir, "chatd.service")
-	wantsLink := filepath.Join(systemdDir, "default.target.wants", "chatd.service")
 
-	plan := []string{
-		"  systemctl --user disable --now chatd.service",
-		"  " + unitPath,
-		"  " + wantsLink + " (symlink, if present)",
-		"  " + paths.ConfigDir + "/  (env, IPC socket, pid)",
-		"  " + paths.DataDir + "/   (message DB, logs)",
-		"  " + binChatd,
-		"  " + binChat,
-		"  " + binClient,
+	var unitFiles []string
+	var stopHeader string
+	if runtime.GOOS == "darwin" {
+		stopHeader = "  launchctl bootout gui/<uid>/io.chatd"
+		unitFiles = []string{
+			os.ExpandEnv("$HOME/Library/LaunchAgents/io.chatd.plist"),
+		}
+	} else {
+		systemdDir := systemdUserDir()
+		stopHeader = "  systemctl --user disable --now chatd.service"
+		unitFiles = []string{
+			filepath.Join(systemdDir, "chatd.service"),
+			filepath.Join(systemdDir, "default.target.wants", "chatd.service"),
+		}
 	}
+
+	plan := []string{stopHeader}
+	for _, u := range unitFiles {
+		plan = append(plan, "  "+u)
+	}
+	plan = append(plan,
+		"  "+paths.ConfigDir+"/  (env, IPC socket, pid)",
+		"  "+paths.DataDir+"/   (message DB, logs)",
+		"  "+binChatd,
+		"  "+binChat,
+		"  "+binClient,
+	)
 	fmt.Println("This will remove:")
 	for _, p := range plan {
 		fmt.Println(p)
@@ -456,20 +500,28 @@ func runUninstall(paths config.Paths, args []string) error {
 		}
 	}
 
-	// 1. Stop and disable the systemd-user service. This also removes
-	//    the wants symlink. Best-effort — keep going on errors.
-	if _, err := exec.LookPath("systemctl"); err == nil {
-		_ = exec.Command("systemctl", "--user", "disable", "--now", "chatd.service").Run()
+	// 1. Stop and unload the platform service. Best-effort — keep going on errors.
+	if runtime.GOOS == "darwin" {
+		if _, err := exec.LookPath("launchctl"); err == nil {
+			uid := fmt.Sprintf("%d", os.Getuid())
+			_ = exec.Command("launchctl", "bootout", "gui/"+uid+"/io.chatd").Run()
+		}
+	} else {
+		if _, err := exec.LookPath("systemctl"); err == nil {
+			_ = exec.Command("systemctl", "--user", "disable", "--now", "chatd.service").Run()
+		}
 	}
 
-	// 2. Remove unit file + any leftover symlink.
-	for _, p := range []string{unitPath, wantsLink} {
+	// 2. Remove unit file(s) and any leftover symlink.
+	for _, p := range unitFiles {
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			fmt.Fprintf(os.Stderr, "warn: %v\n", err)
 		}
 	}
-	if _, err := exec.LookPath("systemctl"); err == nil {
-		_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
+	if runtime.GOOS != "darwin" {
+		if _, err := exec.LookPath("systemctl"); err == nil {
+			_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
+		}
 	}
 
 	// 3. Wipe config + data directories.
@@ -492,7 +544,7 @@ func runUninstall(paths config.Paths, args []string) error {
 	fmt.Println("uninstalled. all traces removed.")
 	fmt.Printf("(note: %s remains on your $PATH if it was added there manually)\n", binDir)
 	fmt.Println("to reinstall later:")
-	fmt.Println("  curl -fsSL https://raw.githubusercontent.com/alsoamit/chatd/main/scripts/install.sh | bash -s -- --download")
+	fmt.Println("  curl -fsSL https://raw.githubusercontent.com/alsoamit/rootchat/main/scripts/install.sh | bash -s -- --download")
 	return nil
 }
 

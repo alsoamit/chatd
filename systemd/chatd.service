@@ -1,6 +1,6 @@
 [Unit]
 Description=chatd — terminal-native realtime chat daemon
-Documentation=https://github.com/alsoamit/chatd
+Documentation=https://github.com/alsoamit/rootchat
 After=network-online.target
 Wants=network-online.target
 

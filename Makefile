@@ -1,4 +1,4 @@
-.PHONY: build test vet tidy install run clean release release-amd64 release-arm64 checksums
+.PHONY: build test vet tidy install run clean release release-linux-amd64 release-linux-arm64 release-darwin-amd64 release-darwin-arm64 checksums
 
 PREFIX  ?= $(HOME)/.local
 BIN_DIR := $(PREFIX)/bin
@@ -51,15 +51,21 @@ clean:
 # statically linked, three binaries plus the systemd unit, env example,
 # and install script are bundled per tarball.
 
-release: clean release-amd64 release-arm64 checksums
+release: clean release-linux-amd64 release-linux-arm64 release-darwin-amd64 release-darwin-arm64 checksums
 	@echo "release artefacts in $(DIST_DIR)/"
 	@ls -la $(DIST_DIR)
 
-release-amd64:
+release-linux-amd64:
 	$(MAKE) -s _build_arch GOOS=linux GOARCH=amd64
 
-release-arm64:
+release-linux-arm64:
 	$(MAKE) -s _build_arch GOOS=linux GOARCH=arm64
+
+release-darwin-amd64:
+	$(MAKE) -s _build_arch GOOS=darwin GOARCH=amd64
+
+release-darwin-arm64:
+	$(MAKE) -s _build_arch GOOS=darwin GOARCH=arm64
 
 # Internal target: build + tar one (GOOS, GOARCH).
 .PHONY: _build_arch
@@ -81,6 +87,7 @@ _build_arch:
 	  cp README.md .env.example $$stage/$$out/ ; \
 	  cp DEPLOY.md $$stage/$$out/ 2>/dev/null || true ; \
 	  cp systemd/chatd.service $$stage/$$out/chatd.service 2>/dev/null || true ; \
+	  cp launchd/io.chatd.plist $$stage/$$out/io.chatd.plist 2>/dev/null || true ; \
 	  cp scripts/install.sh $$stage/$$out/install.sh 2>/dev/null || true ; \
 	  cp scripts/uninstall.sh $$stage/$$out/uninstall.sh 2>/dev/null || true ; \
 	  tar -C $$stage -czf $(DIST_DIR)/$$out.tar.gz $$out ; \

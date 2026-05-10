@@ -19,12 +19,15 @@ const (
 	Ghostty   Backend = "ghostty"
 	Kitty     Backend = "kitty"
 	Alacritty Backend = "alacritty"
+	WezTerm   Backend = "wezterm"
 	Foot      Backend = "foot"
 	Xterm     Backend = "xterm"
 )
 
-// All preference order: try first available.
-var preferred = []Backend{Ghostty, Kitty, Alacritty, Foot, Xterm}
+// All preference order: try first available. Ghostty/kitty/alacritty/
+// wezterm work identically on Linux and macOS; foot is Wayland-Linux
+// only; xterm is X11-Linux only and exists as a last-ditch fallback.
+var preferred = []Backend{Ghostty, Kitty, Alacritty, WezTerm, Foot, Xterm}
 
 // Launcher knows how to spawn windows.
 type Launcher struct {
@@ -111,6 +114,17 @@ func (l Launcher) buildArgs(title string, argv []string) []string {
 			args = append(args, "-T", title)
 		}
 		args = append(args, "-e")
+		args = append(args, argv...)
+		return args
+	case WezTerm:
+		// `wezterm start --class chatd-<title> -- prog args` opens a
+		// fresh window. WezTerm sets the OS window title from --class
+		// when it recognises the value, otherwise the program owns it.
+		args := []string{"start"}
+		if title != "" {
+			args = append(args, "--class", title)
+		}
+		args = append(args, "--")
 		args = append(args, argv...)
 		return args
 	case Foot:

@@ -7,7 +7,7 @@ laptop / desktop.
 
 This doc walks through getting it onto a Linux user's box, given that
 a `v*` tag has been published to
-`https://github.com/alsoamit/chatd/releases`.
+`https://github.com/alsoamit/rootchat/releases`.
 
 ---
 
@@ -16,7 +16,7 @@ a `v*` tag has been published to
 ```bash
 cd ~/projects/lab/chatd
 git init                                  # if not already
-git remote add origin git@github.com:alsoamit/chatd.git
+git remote add origin git@github.com:alsoamit/rootchat.git
 git add . && git commit -m "init chatd"
 git push -u origin main
 
@@ -35,7 +35,7 @@ and attaches it to the release.
 
 ```bash
 # from a published public release
-curl -fsSL https://raw.githubusercontent.com/alsoamit/chatd/main/scripts/install.sh \
+curl -fsSL https://raw.githubusercontent.com/alsoamit/rootchat/main/scripts/install.sh \
   | bash -s -- --download
 
 # from a downloaded tarball (works for private repos)
@@ -212,7 +212,7 @@ chat update
 Or run the installer directly:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/alsoamit/chatd/main/scripts/install.sh \
+curl -fsSL https://raw.githubusercontent.com/alsoamit/rootchat/main/scripts/install.sh \
   | bash -s -- --download
 ```
 
@@ -224,7 +224,7 @@ preserved.
 To pin a specific version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/alsoamit/chatd/main/scripts/install.sh \
+curl -fsSL https://raw.githubusercontent.com/alsoamit/rootchat/main/scripts/install.sh \
   | bash -s -- --download --version v0.1.1
 ```
 
