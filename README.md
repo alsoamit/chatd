@@ -1,123 +1,101 @@
-# chatd — terminal-native realtime chat for Linux
+# chatd
 
-A persistent local daemon plus two BubbleTea TUIs that open as native
-Ghostty windows. No tmux, no shell exposure, no SSH, no browser.
-Spawned conversation windows are dedicated text-message UIs only —
-typing `rm -rf /` just sends a string to your peer.
+Realtime chat that lives in your terminal. One command to install,
+type `chat`, message your friends.
 
 ```
-~/.config/chatd/chatd.env
-        │
-   ┌────┴────┐
-   │  chatd  │  ← systemd-user service (this repo's daemon)
-   └────┬────┘
-        │ unix socket  (~/.config/chatd/ipc.sock)
-        ├──── chat (dashboard)            ← `chat`
-        └──── chat-client (per peer)      ← `ghostty -e chat-client --peer alice`
-        │
-        │  outbound websocket
-        │
-   ┌────┴─────────┐
-   │  chatrelay   │   ← see ../chatrelay
-   └──────────────┘
+   ◆ chatd  ▸  alice
+   relay ✓  connected
+
+   ACTIVE USERS
+    ▸ 1. bob          (2 unread)
+      2. charlie
+
+   ↑/↓ select  •  Enter open  •  q quit
 ```
+
+## What you'll need
+
+- A Linux machine (Ubuntu, Debian, Fedora, anything with systemd)
+- A **relay URL** — the address of the server that ferries messages
+  between people. Whoever set up your group will give you one, e.g.
+  `http://3.91.216.126:7878` or `https://relay.example.com`. To run
+  your own, see [chatrelay](https://github.com/alsoamit/chatrelay).
 
 ## Install
 
 ```bash
-# from a published public release
-curl -fsSL https://raw.githubusercontent.com/alsoamit/chatd/main/scripts/install.sh \
-  | bash -s -- --download
-
-# from a downloaded tarball (works for private repos)
-tar xzf chatd-vX.Y.Z-linux-amd64.tar.gz
-bash chatd-vX.Y.Z-linux-amd64/install.sh
-
-# from a source checkout (developer install)
-bash scripts/install.sh
+curl -fsSL https://raw.githubusercontent.com/alsoamit/chatd/main/scripts/install.sh | bash -s -- --download
 ```
 
-**Do not run with sudo.** chatd is a systemd-user service; it lives
-entirely under your `$HOME`.
+That's it. The installer will ask you three quick questions:
 
-On a fresh install the script asks for two things:
+1. **Server install?** — press Enter (no, this is a regular desktop/laptop).
+2. **Username** — press Enter to use your shell name, or type your own.
+3. **Relay URL** — paste the URL you were given.
 
-- **Username** — defaults to your shell `$(whoami)`.
-- **Relay URL** — required, no default. Accepts
-  `http://host:port`, `https://domain[:port]`, `ws://...`, or
-  `wss://...`. The installer auto-translates `http→ws` / `https→wss`
-  and appends `/ws` if you omit the path.
-
-If the relay URL is empty, installation is cancelled.
-
-On re-run with chatd already installed (the typical "update"
-scenario), the script detects the existing version, prompts
-`Update X → Y? [Y/n]`, and on confirmation stops the service, swaps
-binaries, and restarts. Your `chatd.env` and local message history
-are preserved.
-
-To keep up to date without remembering the curl line, use:
+When it finishes, open a new terminal (or run `source ~/.bashrc`) and type:
 
 ```bash
-chat update
+chat
 ```
 
-It's a thin wrapper around the same install.sh download flow.
+If `chat` says *command not found*, run `source ~/.bashrc` and try again.
 
-See [`DEPLOY.md`](DEPLOY.md) for the long-form walkthrough
-(verification, PATH setup, systemd cheatsheet, troubleshooting).
+## Commands
 
-## CLI
+| command | what it does |
+|---|---|
+| `chat` | Open the dashboard — your home screen with everyone online. |
+| `chat open alice` | Jump straight into a conversation with alice. |
+| `chat send alice "hi"` | One-shot send, no window opens. Useful from scripts. |
+| `chat users` | List who's online. |
+| `chat status` | Show whether the background service is connected. |
+| `chat logs` | Tail the background service's log (when something feels off). |
+| `chat config` | Change your username or relay URL after install. |
+| `chat update` | Fetch the latest release and update yourself. |
+| `chat uninstall` | Remove every trace of chatd from your machine. |
+| `chat dashboard` | Same as `chat`, but always renders in *this* terminal (no popup window). |
+
+Inside a chat window: type and press **Enter** to send. **Shift+Enter** for a newline. **Ctrl+C** to leave.
+
+## How it works
+
+Three pieces:
+
+1. **A relay server** on the internet. All it does is shuttle messages
+   between people. It's a meeting point — it doesn't *do* anything else.
+
+2. **A tiny background service on your machine** called `chatd`. It
+   keeps a persistent connection to the relay so you get messages
+   the instant they arrive, even with no chat window open. systemd
+   starts it on login and restarts it if it ever dies.
+
+3. **The `chat` command**. It never talks to the relay directly — it
+   talks to your local background service, which talks to the relay.
 
 ```
-chat                        open dashboard in a Ghostty window
-chat dashboard              render dashboard inline
-chat open <peer>            open a conversation window
-chat users                  print online users + unread counts
-chat status                 print daemon status
-chat send <peer> <body>...  one-shot send (no UI)
-chat logs                   follow journald output for chatd.service
+you type in `chat`  →  your local chatd  →  relay  →  friend's chatd  →  friend's `chat`
 ```
 
-## Configuration
+When someone messages you and you don't have a chat window open:
 
-`~/.config/chatd/chatd.env`:
+- A desktop notification pops up.
+- If you have a supported terminal (Ghostty, Kitty, Alacritty, foot,
+  xterm), a new chat window opens automatically.
+- On a server or a machine without one, the message stores quietly.
+  Open `chat` later and you'll see an unread badge next to that peer.
 
-```ini
-CHATD_USERNAME=alice
-CHATD_TOKEN=open
-CHATD_RELAY_URL=ws://relay.example:7878/ws
-# CHATD_TERMINAL=ghostty
-```
+### What it is *not*
 
-systemd's `Environment=` directives override individual values.
+- **Not SSH.** Chat windows can't execute commands. Typing
+  `rm -rf /` just sends those characters as a message. It's text.
+- **Not a browser app.** Native terminal, native OS windows.
+- **Not snitching on you.** Messages go through the relay you
+  configured. Nowhere else.
 
-## Storage
+## More
 
-Persistent state lives at `~/.local/share/chatd/data.db` (bbolt). It
-holds per-peer message logs, unread counters, and merge-history
-breadcrumbs. The relay holds the canonical history; local storage is
-a cache that gets reconciled on every conversation open.
-
-## Why no shell?
-
-The daemon spawns each conversation window as
-`ghostty --title="CHAT — alice" -e chat-client --peer alice`. The
-`chat-client` binary owns the terminal — there is no `bash`, no
-`PATH`, no `exec`. Keystrokes flow into a BubbleTea textarea and out
-over the local IPC socket as plain text frames. There is no path
-inside the program by which user input becomes a system call.
-
-## Development
-
-```bash
-make build   # build all three binaries into ./bin
-make test    # run the test suite
-make vet     # go vet ./...
-```
-
-Tests cover protocol validation, the bbolt storage layer, the
-config/env loader, the websocket reconnect path, the IPC server
-handshake + broadcast filtering, and the conversation-manager state
-machine (incoming messages, presence, self-echo dedup, unread
-bookkeeping).
+- [`DEPLOY.md`](DEPLOY.md) — server admin guide, advanced install,
+  troubleshooting.
+- Issues / questions: <https://github.com/alsoamit/chatd/issues>

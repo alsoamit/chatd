@@ -393,6 +393,14 @@ if [[ "$write_env" == "1" ]]; then
   token="${CHATD_TOKEN:-${cur_tok:-open}}"
   term="${CHATD_TERMINAL:-$cur_term}"
 
+  # Server installs explicitly pin "none" so neither the daemon nor the
+  # chat CLI ever tries to spawn a popup window — they always render
+  # inline. (terminal.Detect returns an error for any non-empty hint
+  # not on $PATH, which the headless code path then handles.)
+  if [[ "$is_server" == "1" ]]; then
+    term="none"
+  fi
+
   {
     printf 'CHATD_USERNAME=%s\n' "$user"
     printf 'CHATD_TOKEN=%s\n' "$token"
@@ -402,7 +410,19 @@ if [[ "$write_env" == "1" ]]; then
   chmod 0600 "$ENV_FILE"
   c_green "wrote $ENV_FILE  (user=$user  relay=$url)"
 else
-  c_cyan "keeping existing $ENV_FILE"
+  # Even on update, if the user just switched to server mode, make sure
+  # CHATD_TERMINAL=none gets pinned in the existing env.
+  if [[ "$is_server" == "1" ]] && ! grep -q '^CHATD_TERMINAL=none' "$ENV_FILE" 2>/dev/null; then
+    # Replace any existing CHATD_TERMINAL line, or append.
+    if grep -q '^CHATD_TERMINAL=' "$ENV_FILE" 2>/dev/null; then
+      sed -i 's|^CHATD_TERMINAL=.*|CHATD_TERMINAL=none|' "$ENV_FILE"
+    else
+      printf 'CHATD_TERMINAL=none\n' >> "$ENV_FILE"
+    fi
+    c_cyan "pinned CHATD_TERMINAL=none in $ENV_FILE (server mode)"
+  else
+    c_cyan "keeping existing $ENV_FILE"
+  fi
 fi
 
 # 6. systemd-user unit
@@ -420,11 +440,46 @@ if command -v systemctl >/dev/null && [[ "${CHATD_NO_START:-0}" != "1" ]]; then
   c_cyan  "  logs:   journalctl --user -u chatd.service -f"
 fi
 
-# 8. PATH check
+# 8. PATH — make sure $BIN_DIR resolves on the user's shell now and
+#    on every future shell. We append to whichever rc file matches the
+#    user's login shell (bash → ~/.bashrc, zsh → ~/.zshrc, anything
+#    else → ~/.profile), but only if the line isn't already present.
+add_path_to_rc() {
+  local rcfile="$1"
+  local marker='# Added by chatd installer:'
+  if [[ -f "$rcfile" ]] && grep -qF "$BIN_DIR" "$rcfile" 2>/dev/null; then
+    return 1
+  fi
+  {
+    printf '\n%s\n' "$marker"
+    printf 'export PATH="%s:$PATH"\n' "$BIN_DIR"
+  } >> "$rcfile"
+  return 0
+}
+
 case ":$PATH:" in
-  *":$BIN_DIR:"*) ;;
-  *) c_yellow "$BIN_DIR is not in PATH. add to ~/.bashrc:"
-     c_yellow "    export PATH=\"$BIN_DIR:\$PATH\"" ;;
+  *":$BIN_DIR:"*)
+    : # already on PATH for this shell, nothing to do
+    ;;
+  *)
+    rc="$HOME/.bashrc"
+    case "${SHELL:-}" in
+      */zsh) rc="$HOME/.zshrc" ;;
+      */bash) rc="$HOME/.bashrc" ;;
+      *)
+        # Fall back to ~/.profile when neither bash nor zsh is the
+        # login shell; ~/.profile is sourced by both at login.
+        [[ -f "$HOME/.profile" ]] && rc="$HOME/.profile"
+        ;;
+    esac
+    if add_path_to_rc "$rc"; then
+      c_green "added $BIN_DIR to PATH in $rc"
+      c_yellow "run this to apply in the current shell, or open a new one:"
+      c_yellow "    source $rc"
+    else
+      c_cyan "$BIN_DIR already referenced in $rc — open a new shell to pick it up"
+    fi
+    ;;
 esac
 
 c_green "all set. open the dashboard with: chat"
