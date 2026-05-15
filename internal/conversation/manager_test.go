@@ -1,10 +1,12 @@
 package conversation
 
 import (
+	"bytes"
 	"path/filepath"
 	"sync"
 	"testing"
 
+	"github.com/cedrx/chatd/internal/crypto"
 	"github.com/cedrx/chatd/internal/ipc"
 	"github.com/cedrx/chatd/internal/protocol"
 	"github.com/cedrx/chatd/internal/storage"
@@ -45,8 +47,13 @@ func newManager(t *testing.T) (*Manager, *stubSpawner, *storage.Store) {
 		Token:    "x",
 	})
 	srv := ipc.NewServer(filepath.Join(dir, "ipc.sock"), nil, nil)
+	id, err := crypto.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
 	m := New(Config{
 		Username:       "alice",
+		Identity:       id,
 		Storage:        store,
 		WS:             ws,
 		IPC:            srv,
@@ -135,6 +142,85 @@ func TestHelloRejectsBadPeer(t *testing.T) {
 	conn := &ipc.Conn{} // zero value — only used for SetRole/SetPeer paths
 	if err := m.OnHello(conn, ipc.Hello{Op: ipc.OpHello, Role: ipc.RoleConversation, Peer: "with space"}); err == nil {
 		t.Error("expected validation error")
+	}
+}
+
+func TestEncryptedRecvDecryptsAndStoresPlaintext(t *testing.T) {
+	m, _, store := newManager(t)
+
+	// Pretend bob is the manager's identity (newManager calls itself
+	// "alice" but we can rebind for clarity here). Generate alice's
+	// identity, register her pubkey via AuthOK.
+	alice, err := crypto.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.HandleRelayEvent(protocol.AuthOK{
+		Type: protocol.TypeAuthOK, Self: "alice",
+		Users: []protocol.User{
+			{Name: "alice", Online: true, PubKey: m.cfg.Identity.PublicKeyB64()},
+			{Name: "bob", Online: true, PubKey: alice.PublicKeyB64()},
+		},
+	})
+
+	// alice encrypts a message addressed to "alice" (the manager's
+	// configured username) using the manager's pubkey.
+	plaintext := []byte("e2e ping")
+	myPub := m.cfg.Identity.PublicKey()
+	ct, err := alice.Encrypt(myPub, "msg-7", "bob", "alice", plaintext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.HandleRelayEvent(protocol.MessageRecv{
+		Type: protocol.TypeMessageRecv, ID: "msg-7",
+		From: "bob", To: "alice", Body: ct, Encrypted: true,
+		TS: 1,
+	})
+	hist, _ := store.History("bob", 10)
+	if len(hist) != 1 {
+		t.Fatalf("expected 1 stored message, got %d", len(hist))
+	}
+	if hist[0].Body != string(plaintext) {
+		t.Errorf("stored body = %q, want %q", hist[0].Body, plaintext)
+	}
+	if hist[0].Encrypted {
+		t.Error("stored entry still has Encrypted=true; should be cleared after decrypt")
+	}
+}
+
+func TestEncryptedRecvFailsWithoutPubkey(t *testing.T) {
+	m, _, store := newManager(t)
+
+	// Receiving an encrypted message before any pubkey was advertised
+	// for the sender should drop the message (with a log line) rather
+	// than write garbage to the DB.
+	m.HandleRelayEvent(protocol.MessageRecv{
+		Type: protocol.TypeMessageRecv, ID: "msg-1",
+		From: "stranger", To: "alice", Body: "ZmFrZQ==", Encrypted: true,
+		TS: 1,
+	})
+	hist, _ := store.History("stranger", 10)
+	if len(hist) != 0 {
+		t.Errorf("expected 0 stored messages, got %d", len(hist))
+	}
+}
+
+func TestRecordPeerKeyTOFUOverwrite(t *testing.T) {
+	m, _, store := newManager(t)
+	first, _ := crypto.Generate()
+	second, _ := crypto.Generate()
+
+	m.recordPeerKey("bob", first.PublicKeyB64())
+	if got, _ := store.GetPeerKey("bob"); !bytes.Equal(got, first.PublicKey()) {
+		t.Error("first key didn't persist")
+	}
+
+	// A second pubkey replaces the first (and emits a log warning we
+	// don't capture here; the important behaviour is that we keep
+	// accepting the peer rather than error-storming).
+	m.recordPeerKey("bob", second.PublicKeyB64())
+	if got, _ := store.GetPeerKey("bob"); !bytes.Equal(got, second.PublicKey()) {
+		t.Error("rotated key didn't persist")
 	}
 }
 

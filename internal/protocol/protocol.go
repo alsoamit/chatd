@@ -55,6 +55,7 @@ type Auth struct {
 	Type     string `json:"type"`
 	Username string `json:"username"`
 	Token    string `json:"token"`
+	PubKey   string `json:"pubkey,omitempty"` // base64 X25519 public key
 }
 
 type AuthOK struct {
@@ -63,14 +64,18 @@ type AuthOK struct {
 	Self  string `json:"self"`
 }
 
-type AuthError struct {
-	Type    string `json:"type"`
-	Message string `json:"message"`
-}
-
+// User in the relay's user list. PubKey is the X25519 public key the
+// peer authenticated with — clients use it to encrypt outbound
+// messages and to verify the sender of inbound ones.
 type User struct {
 	Name   string `json:"name"`
 	Online bool   `json:"online"`
+	PubKey string `json:"pubkey,omitempty"`
+}
+
+type AuthError struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
 }
 
 type Heartbeat struct {
@@ -81,6 +86,7 @@ type Presence struct {
 	Type     string `json:"type"`
 	Username string `json:"username"`
 	Online   bool   `json:"online"`
+	PubKey   string `json:"pubkey,omitempty"` // populated when Online=true
 }
 
 type UserList struct {
@@ -89,19 +95,21 @@ type UserList struct {
 }
 
 type MessageSend struct {
-	Type string `json:"type"`
-	ID   string `json:"id"`
-	To   string `json:"to"`
-	Body string `json:"body"`
+	Type      string `json:"type"`
+	ID        string `json:"id"`
+	To        string `json:"to"`
+	Body      string `json:"body"`                // ciphertext when Encrypted=true
+	Encrypted bool   `json:"encrypted,omitempty"` // body is base64(nonce||ciphertext)
 }
 
 type MessageRecv struct {
-	Type string `json:"type"`
-	ID   string `json:"id"`
-	From string `json:"from"`
-	To   string `json:"to"`
-	Body string `json:"body"`
-	TS   int64  `json:"ts"`
+	Type      string `json:"type"`
+	ID        string `json:"id"`
+	From      string `json:"from"`
+	To        string `json:"to"`
+	Body      string `json:"body"`
+	TS        int64  `json:"ts"`
+	Encrypted bool   `json:"encrypted,omitempty"`
 }
 
 type MessageAck struct {

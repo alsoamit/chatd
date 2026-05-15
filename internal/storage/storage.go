@@ -21,9 +21,10 @@ import (
 )
 
 var (
-	bucketConv   = []byte("conv")
-	bucketUnread = []byte("unread")
-	bucketMeta   = []byte("meta")
+	bucketConv     = []byte("conv")
+	bucketUnread   = []byte("unread")
+	bucketMeta     = []byte("meta")
+	bucketPeerKeys = []byte("peer_keys") // peer username -> raw 32-byte X25519 pubkey
 )
 
 // Store is the on-disk persistence handle.
@@ -39,7 +40,7 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("storage open: %w", err)
 	}
 	if err := db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketConv, bucketUnread, bucketMeta} {
+		for _, b := range [][]byte{bucketConv, bucketUnread, bucketMeta, bucketPeerKeys} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
@@ -191,6 +192,51 @@ func (s *Store) AllUnread() (map[string]uint64, error) {
 			if len(v) == 8 {
 				out[string(k)] = binary.BigEndian.Uint64(v)
 			}
+			return nil
+		})
+	})
+	return out, err
+}
+
+// SetPeerKey records peer's raw 32-byte X25519 pubkey. Overwrites any
+// existing entry. Caller is responsible for surfacing key-change
+// warnings before calling — by the time we get here we trust the key.
+func (s *Store) SetPeerKey(peer string, pubkey []byte) error {
+	if peer == "" || len(pubkey) != 32 {
+		return errors.New("storage: SetPeerKey: invalid arguments")
+	}
+	cp := make([]byte, len(pubkey))
+	copy(cp, pubkey)
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketPeerKeys).Put([]byte(peer), cp)
+	})
+}
+
+// GetPeerKey returns the cached pubkey for peer, or (nil, nil) if none.
+func (s *Store) GetPeerKey(peer string) ([]byte, error) {
+	var out []byte
+	err := s.db.View(func(tx *bolt.Tx) error {
+		v := tx.Bucket(bucketPeerKeys).Get([]byte(peer))
+		if len(v) == 32 {
+			out = make([]byte, 32)
+			copy(out, v)
+		}
+		return nil
+	})
+	return out, err
+}
+
+// AllPeerKeys snapshots every cached pubkey. Useful for `chat keys`.
+func (s *Store) AllPeerKeys() (map[string][]byte, error) {
+	out := map[string][]byte{}
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketPeerKeys).ForEach(func(k, v []byte) error {
+			if len(v) != 32 {
+				return nil
+			}
+			cp := make([]byte, 32)
+			copy(cp, v)
+			out[string(k)] = cp
 			return nil
 		})
 	})

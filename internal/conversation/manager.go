@@ -6,6 +6,7 @@
 package conversation
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cedrx/chatd/internal/crypto"
 	"github.com/cedrx/chatd/internal/ipc"
 	"github.com/cedrx/chatd/internal/notifications"
 	"github.com/cedrx/chatd/internal/protocol"
@@ -31,6 +33,7 @@ type Spawner interface {
 type Config struct {
 	Username       string
 	RelayURL       string
+	Identity       *crypto.Identity // long-term X25519 keypair for E2EE
 	Storage        *storage.Store
 	WS             *wsclient.Client
 	IPC            *ipc.Server
@@ -50,6 +53,7 @@ type Manager struct {
 	unread   map[string]uint64 // peer -> count cached from storage
 	subPeer  map[string]int    // peer -> # of conversation subscribers
 	pending  map[string]string // pending message id -> peer (for ack routing)
+	peerKeys map[string][]byte // username -> raw 32-byte X25519 pubkey
 	relayUp  bool
 	dashOpen bool
 
@@ -63,17 +67,25 @@ func New(cfg Config) *Manager {
 		cfg.Logger = log.Default()
 	}
 	m := &Manager{
-		cfg:     cfg,
-		users:   map[string]bool{},
-		unread:  map[string]uint64{},
-		subPeer: map[string]int{},
-		pending: map[string]string{},
-		logger:  cfg.Logger,
+		cfg:      cfg,
+		users:    map[string]bool{},
+		unread:   map[string]uint64{},
+		subPeer:  map[string]int{},
+		pending:  map[string]string{},
+		peerKeys: map[string][]byte{},
+		logger:   cfg.Logger,
 	}
 	if cfg.Storage != nil {
 		if all, err := cfg.Storage.AllUnread(); err == nil {
 			for k, v := range all {
 				m.unread[k] = v
+			}
+		}
+		// Hydrate the peer-key cache from disk so encrypted history
+		// can be decrypted before any presence frames arrive.
+		if all, err := cfg.Storage.AllPeerKeys(); err == nil {
+			for k, v := range all {
+				m.peerKeys[k] = v
 			}
 		}
 	}
@@ -212,6 +224,12 @@ func (m *Manager) HandleRelayEvent(ev any) {
 			}
 		}
 		m.mu.Unlock()
+		// TOFU-record every peer's pubkey we got at handshake time.
+		for _, u := range v.Users {
+			if u.Name != m.cfg.Username && u.PubKey != "" {
+				m.recordPeerKey(u.Name, u.PubKey)
+			}
+		}
 		m.broadcastRelayState(true)
 		m.broadcastUserList()
 
@@ -222,6 +240,9 @@ func (m *Manager) HandleRelayEvent(ev any) {
 		m.mu.Lock()
 		m.users[v.Username] = v.Online
 		m.mu.Unlock()
+		if v.Online && v.PubKey != "" {
+			m.recordPeerKey(v.Username, v.PubKey)
+		}
 		m.broadcastPresence(v.Username, v.Online)
 
 	case protocol.MessageRecv:
@@ -257,6 +278,57 @@ func (m *Manager) HandleRelayState(up bool) {
 
 // --- internals ---------------------------------------------------------
 
+// recordPeerKey applies trust-on-first-use logic for a peer's X25519
+// public key. New keys are accepted silently; a *change* against a
+// previously-stored key emits a warning to the journal so an admin
+// notices a potential MITM. We still accept the new key (matching SSH's
+// "accept-new" UX) — flip this to refusal once we ship a CLI for
+// out-of-band verification (`chat trust <peer>`).
+func (m *Manager) recordPeerKey(peer, b64 string) {
+	if peer == "" || b64 == "" {
+		return
+	}
+	raw, err := crypto.ParsePublicKey(b64)
+	if err != nil {
+		m.logger.Printf("conversation: bad pubkey for %s: %v", peer, err)
+		return
+	}
+	m.mu.Lock()
+	prev := m.peerKeys[peer]
+	m.peerKeys[peer] = raw
+	m.mu.Unlock()
+
+	if len(prev) == 32 && !bytes.Equal(prev, raw) {
+		m.logger.Printf("SECURITY: pubkey for %s changed (was %s, now %s) — accepting new key (TOFU)",
+			peer, crypto.Fingerprint(prev), crypto.Fingerprint(raw))
+	}
+	if m.cfg.Storage != nil {
+		_ = m.cfg.Storage.SetPeerKey(peer, raw)
+	}
+}
+
+// peerKeyFor returns the cached pubkey for peer, falling back to disk
+// if the in-memory cache hasn't been populated yet (e.g. before the
+// relay's AuthOK arrives).
+func (m *Manager) peerKeyFor(peer string) []byte {
+	m.mu.RLock()
+	k := m.peerKeys[peer]
+	m.mu.RUnlock()
+	if len(k) == 32 {
+		return k
+	}
+	if m.cfg.Storage == nil {
+		return nil
+	}
+	if disk, _ := m.cfg.Storage.GetPeerKey(peer); len(disk) == 32 {
+		m.mu.Lock()
+		m.peerKeys[peer] = disk
+		m.mu.Unlock()
+		return disk
+	}
+	return nil
+}
+
 func (m *Manager) handleSend(c *ipc.Conn, s ipc.Send) error {
 	body, err := protocol.ValidateBody(s.Body)
 	if err != nil {
@@ -265,18 +337,40 @@ func (m *Manager) handleSend(c *ipc.Conn, s ipc.Send) error {
 	if err := protocol.ValidateUsername(s.Peer); err != nil {
 		return c.Write(ipc.Error{Op: ipc.OpError, Message: err.Error()})
 	}
+
+	// We require knowing the peer's X25519 pubkey before we'll send
+	// anything. No fall-through to plaintext — if we don't know how to
+	// encrypt to them, we fail loudly and the user gets an error in
+	// their UI rather than a silently-readable message on the wire.
 	id := uuid.NewString()
+	wireBody := body
+	encrypted := false
+	if m.cfg.Identity != nil {
+		peerKey := m.peerKeyFor(s.Peer)
+		if peerKey == nil {
+			return c.Write(ipc.Error{Op: ipc.OpError, Message: "peer's encryption key not available — wait for them to come online or re-establish keys"})
+		}
+		ct, err := m.cfg.Identity.Encrypt(peerKey, id, m.cfg.Username, s.Peer, []byte(body))
+		if err != nil {
+			m.logger.Printf("conversation: encrypt to %s failed: %v", s.Peer, err)
+			return c.Write(ipc.Error{Op: ipc.OpError, Message: "encryption failed"})
+		}
+		wireBody = ct
+		encrypted = true
+	}
+
 	m.mu.Lock()
 	m.pending[id] = s.Peer
 	m.mu.Unlock()
 	dropped := m.cfg.WS.Send(protocol.MessageSend{
-		Type: protocol.TypeMessageSend, ID: id, To: s.Peer, Body: body,
+		Type: protocol.TypeMessageSend, ID: id, To: s.Peer,
+		Body: wireBody, Encrypted: encrypted,
 	})
 	if dropped {
 		m.logger.Printf("conversation: outbound queue dropped frame for %s", s.Peer)
 	}
-	// Echo to local UI so user sees their message immediately even
-	// before the relay's MessageRecv echo arrives.
+	// Echo to local UI / storage with the *plaintext* — local DB never
+	// holds ciphertext we've already decrypted.
 	echo := protocol.MessageRecv{
 		Type: protocol.TypeMessageRecv, ID: id,
 		From: m.cfg.Username, To: s.Peer, Body: body, TS: protocol.NowMillis(),
@@ -298,6 +392,29 @@ func (m *Manager) handleMessageRecv(rec protocol.MessageRecv) {
 		return
 	}
 	peer := rec.From
+
+	// Decrypt before doing anything else — including before storing
+	// to the local DB, so disk only ever sees plaintext for the user
+	// who actually owns the keys.
+	if rec.Encrypted {
+		if m.cfg.Identity == nil {
+			m.logger.Printf("conversation: received encrypted message but no identity loaded; dropping")
+			return
+		}
+		peerKey := m.peerKeyFor(rec.From)
+		if peerKey == nil {
+			m.logger.Printf("conversation: no pubkey cached for %s; cannot decrypt %s", rec.From, rec.ID)
+			return
+		}
+		pt, err := m.cfg.Identity.Decrypt(peerKey, rec.ID, rec.From, rec.To, rec.Body)
+		if err != nil {
+			m.logger.Printf("conversation: decrypt from %s id=%s: %v", rec.From, rec.ID, err)
+			return
+		}
+		rec.Body = string(pt)
+		rec.Encrypted = false
+	}
+
 	if err := m.cfg.Storage.AppendMessage(peer, rec); err != nil {
 		m.logger.Printf("conversation: append: %v", err)
 	}
@@ -343,10 +460,38 @@ func (m *Manager) handleAck(a protocol.MessageAck) {
 }
 
 func (m *Manager) handleHistoryResponse(h protocol.HistoryResponse) {
-	if err := m.cfg.Storage.MergeHistory(h.Peer, h.Messages); err != nil {
+	// Decrypt every encrypted entry in place. Messages we sent and
+	// messages we received are both keyed against the *peer's* pubkey
+	// (the conversation partner) — so the lookup is the same.
+	decrypted := make([]protocol.MessageRecv, 0, len(h.Messages))
+	for _, msg := range h.Messages {
+		if msg.Encrypted {
+			if m.cfg.Identity == nil {
+				continue
+			}
+			counterparty := msg.From
+			if counterparty == m.cfg.Username {
+				counterparty = msg.To
+			}
+			peerKey := m.peerKeyFor(counterparty)
+			if peerKey == nil {
+				m.logger.Printf("conversation: history: no pubkey for %s, dropping %s", counterparty, msg.ID)
+				continue
+			}
+			pt, err := m.cfg.Identity.Decrypt(peerKey, msg.ID, msg.From, msg.To, msg.Body)
+			if err != nil {
+				m.logger.Printf("conversation: history decrypt id=%s: %v", msg.ID, err)
+				continue
+			}
+			msg.Body = string(pt)
+			msg.Encrypted = false
+		}
+		decrypted = append(decrypted, msg)
+	}
+	if err := m.cfg.Storage.MergeHistory(h.Peer, decrypted); err != nil {
 		m.logger.Printf("conversation: history merge: %v", err)
 	}
-	m.cfg.IPC.Broadcast(toIPCHistory(h.Peer, m.cfg.Username, h.Messages),
+	m.cfg.IPC.Broadcast(toIPCHistory(h.Peer, m.cfg.Username, decrypted),
 		func(c *ipc.Conn) bool {
 			return c.Role() == ipc.RoleConversation && c.Peer() == h.Peer
 		})

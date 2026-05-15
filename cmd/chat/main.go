@@ -26,9 +26,11 @@ import (
 	"time"
 
 	"github.com/cedrx/chatd/internal/config"
+	cryptoid "github.com/cedrx/chatd/internal/crypto"
 	"github.com/cedrx/chatd/internal/dashboard"
 	"github.com/cedrx/chatd/internal/ipc"
 	"github.com/cedrx/chatd/internal/protocol"
+	"github.com/cedrx/chatd/internal/storage"
 	"github.com/cedrx/chatd/internal/terminal"
 	"github.com/cedrx/chatd/internal/version"
 	tea "github.com/charmbracelet/bubbletea"
@@ -78,6 +80,8 @@ func run(args []string) error {
 		return runConfig(paths)
 	case "uninstall", "purge":
 		return runUninstall(paths, args[1:])
+	case "keys", "fingerprint":
+		return runKeys(paths, args[1:])
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return nil
@@ -98,6 +102,7 @@ USAGE:
   chat update                 fetch the latest release and reinstall
   chat config                 re-run the username / relay URL prompts
   chat uninstall [--yes]      remove every trace of chatd from this user
+  chat keys [<peer>]          show your encryption fingerprint (or a peer's)
   chat --version              print build metadata
 `
 
@@ -576,6 +581,52 @@ func systemdUserDir() string {
 	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".config", "systemd", "user")
+}
+
+// runKeys prints the local identity's fingerprint, or — when given a
+// peer name — the fingerprint we have cached for that peer. Compare
+// the value with your peer over a trusted channel (in person, on a
+// signed signal call, etc.) to verify nobody is impersonating them.
+func runKeys(paths config.Paths, args []string) error {
+	id, err := cryptoid.LoadOrCreate(paths.IdentityFile)
+	if err != nil {
+		return fmt.Errorf("identity: %w", err)
+	}
+	if len(args) == 0 {
+		fmt.Printf("self  fingerprint:  %s\n", cryptoid.Fingerprint(id.PublicKey()))
+		fmt.Printf("self  public key:   %s\n", id.PublicKeyB64())
+		fmt.Println()
+		st, err := storage.Open(paths.DBFile)
+		if err != nil {
+			return nil // DB not present yet — fine
+		}
+		defer st.Close()
+		all, err := st.AllPeerKeys()
+		if err != nil || len(all) == 0 {
+			fmt.Println("(no peer keys cached yet)")
+			return nil
+		}
+		fmt.Println("known peers:")
+		for name, k := range all {
+			fmt.Printf("  %-24s %s\n", name, cryptoid.Fingerprint(k))
+		}
+		return nil
+	}
+	peer := args[0]
+	st, err := storage.Open(paths.DBFile)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	k, err := st.GetPeerKey(peer)
+	if err != nil {
+		return err
+	}
+	if len(k) != 32 {
+		return fmt.Errorf("no key cached for %s — they need to come online once first", peer)
+	}
+	fmt.Printf("%s  fingerprint:  %s\n", peer, cryptoid.Fingerprint(k))
+	return nil
 }
 
 // runUpdate re-invokes the published install.sh in --download mode.

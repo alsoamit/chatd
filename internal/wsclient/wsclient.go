@@ -31,6 +31,7 @@ type Config struct {
 	URL            string
 	Username       string
 	Token          string
+	PubKey         string // base64 X25519 public key, sent with auth
 	Heartbeat      time.Duration
 	BackoffMin     time.Duration
 	BackoffMax     time.Duration
@@ -171,6 +172,7 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	// Auth handshake.
 	if err := writeJSON(conn, protocol.Auth{
 		Type: protocol.TypeAuth, Username: c.cfg.Username, Token: c.cfg.Token,
+		PubKey: c.cfg.PubKey,
 	}, c.cfg.WriteTimeout); err != nil {
 		_ = conn.Close()
 		return fmt.Errorf("auth send: %w", err)

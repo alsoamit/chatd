@@ -15,13 +15,14 @@ import (
 
 // Paths bundles every filesystem location the daemon and its CLIs need.
 type Paths struct {
-	ConfigDir string // ~/.config/chatd
-	DataDir   string // ~/.local/share/chatd
-	EnvFile   string // ~/.config/chatd/chatd.env
-	IPCSocket string // ~/.config/chatd/ipc.sock
-	PIDFile   string // ~/.config/chatd/chatd.pid
-	DBFile    string // ~/.local/share/chatd/data.db
-	LogFile   string // ~/.local/share/chatd/chatd.log
+	ConfigDir    string // ~/.config/chatd
+	DataDir      string // ~/.local/share/chatd
+	EnvFile      string // ~/.config/chatd/chatd.env
+	IPCSocket    string // ~/.config/chatd/ipc.sock
+	PIDFile      string // ~/.config/chatd/chatd.pid
+	DBFile       string // ~/.local/share/chatd/data.db
+	LogFile      string // ~/.local/share/chatd/chatd.log
+	IdentityFile string // ~/.local/share/chatd/identity.key (raw 32 bytes)
 }
 
 // Resolve computes the standard directory layout. It does not create
@@ -42,13 +43,14 @@ func Resolve() (Paths, error) {
 	cfgDir := filepath.Join(configHome, "chatd")
 	dataDir := filepath.Join(dataHome, "chatd")
 	return Paths{
-		ConfigDir: cfgDir,
-		DataDir:   dataDir,
-		EnvFile:   filepath.Join(cfgDir, "chatd.env"),
-		IPCSocket: filepath.Join(cfgDir, "ipc.sock"),
-		PIDFile:   filepath.Join(cfgDir, "chatd.pid"),
-		DBFile:    filepath.Join(dataDir, "data.db"),
-		LogFile:   filepath.Join(dataDir, "chatd.log"),
+		ConfigDir:    cfgDir,
+		DataDir:      dataDir,
+		EnvFile:      filepath.Join(cfgDir, "chatd.env"),
+		IPCSocket:    filepath.Join(cfgDir, "ipc.sock"),
+		PIDFile:      filepath.Join(cfgDir, "chatd.pid"),
+		DBFile:       filepath.Join(dataDir, "data.db"),
+		LogFile:      filepath.Join(dataDir, "chatd.log"),
+		IdentityFile: filepath.Join(dataDir, "identity.key"),
 	}, nil
 }
 

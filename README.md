@@ -59,6 +59,7 @@ If `chat` says *command not found*, run `source ~/.bashrc` and try again.
 | `chat config` | Change your username or relay URL after install. |
 | `chat update` | Fetch the latest release and update yourself. |
 | `chat uninstall` | Remove every trace of rootchat from your machine. |
+| `chat keys` | Show your encryption fingerprint (and every friend's). Useful to verify someone is who they say they are. |
 | `chat dashboard` | Same as `chat`, but always renders in *this* terminal (no popup window). |
 
 Inside a chat window: type and press **Enter** to send. **Shift+Enter** for a newline. **Ctrl+C** to leave.
@@ -97,13 +98,37 @@ something:
   saved quietly. Open `chat` later and you'll see an unread badge
   next to that peer.
 
+### Your messages are end-to-end encrypted
+
+Every message you send is sealed before it leaves your machine and
+opened only on the recipient's machine. The post office (the relay)
+shuffles **sealed envelopes** between people; it never sees the
+contents.
+
+- Each install generates a long-term keypair on first run and stores
+  the private half at `~/.local/share/chatd/identity.key` (mode
+  `0600`).
+- The first time you see a friend, your computer remembers their
+  public key. If their key ever changes (they reinstalled, or
+  someone is trying to impersonate them), you'll see a `SECURITY:`
+  warning in the daemon's log.
+- Verify a friend out-of-band by comparing fingerprints —
+  `chat keys` prints yours and every friend's.
+
+What it does **not** yet provide: forward secrecy. If your private
+key is ever stolen, every past message sent to you can be decrypted
+by whoever holds the captured ciphertexts. For most casual use this
+is fine; for stronger guarantees we'd need a Signal-style ratchet,
+which is a future addition.
+
 ### What rootchat is *not*
 
 - **Not SSH.** Chat windows can't execute commands. Typing
   `rm -rf /` just sends those characters as a message. It's text.
 - **Not a browser app.** Native terminal, native OS windows.
-- **Not snitching on you.** Messages go through the relay you
-  configured. Nowhere else.
+- **Not snitching on you.** Messages are end-to-end encrypted; the
+  relay can see who's online and who messages whom, but never what
+  you said.
 
 ## More
 

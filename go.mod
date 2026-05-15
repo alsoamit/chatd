@@ -1,6 +1,6 @@
 module github.com/cedrx/chatd
 
-go 1.23
+go 1.25.0
 
 require (
 	github.com/charmbracelet/bubbles v0.20.0
@@ -9,6 +9,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	go.etcd.io/bbolt v1.3.11
+	golang.org/x/crypto v0.51.0
 )
 
 require (
@@ -28,7 +29,7 @@ require (
 	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
-	golang.org/x/sync v0.11.0 // indirect
-	golang.org/x/sys v0.30.0 // indirect
-	golang.org/x/text v0.3.8 // indirect
+	golang.org/x/sync v0.20.0 // indirect
+	golang.org/x/sys v0.44.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
 )

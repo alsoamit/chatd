@@ -12,6 +12,7 @@ import (
 
 	"github.com/cedrx/chatd/internal/config"
 	"github.com/cedrx/chatd/internal/conversation"
+	"github.com/cedrx/chatd/internal/crypto"
 	"github.com/cedrx/chatd/internal/ipc"
 	"github.com/cedrx/chatd/internal/notifications"
 	"github.com/cedrx/chatd/internal/storage"
@@ -53,6 +54,14 @@ func New(opts Options) (*Daemon, error) {
 		return nil, err
 	}
 
+	identity, err := crypto.LoadOrCreate(opts.Paths.IdentityFile)
+	if err != nil {
+		_ = st.Close()
+		return nil, fmt.Errorf("identity: %w", err)
+	}
+	opts.Logger.Printf("daemon: identity %s (fp %s)",
+		opts.Paths.IdentityFile, crypto.Fingerprint(identity.PublicKey()))
+
 	var spawner conversation.Spawner
 	launcher, err := terminal.Detect(opts.Settings.Terminal)
 	if err != nil {
@@ -67,6 +76,7 @@ func New(opts Options) (*Daemon, error) {
 		URL:      opts.Settings.RelayURL,
 		Username: opts.Settings.Username,
 		Token:    opts.Settings.Token,
+		PubKey:   identity.PublicKeyB64(),
 		Logger:   opts.Logger,
 	})
 
@@ -77,6 +87,7 @@ func New(opts Options) (*Daemon, error) {
 	m := conversation.New(conversation.Config{
 		Username:       opts.Settings.Username,
 		RelayURL:       opts.Settings.RelayURL,
+		Identity:       identity,
 		Storage:        st,
 		WS:             ws,
 		IPC:            srv,
